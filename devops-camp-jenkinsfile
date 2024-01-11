@@ -53,6 +53,14 @@ pipeline {
                 }
             }
         }
+        stage('Security scanning') {
+            steps {
+                  withCredentials([usernamePassword(credentialsId: 'svillalon-harbor-auth', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                      echo "Scanning $APP_IMAGE_NAME image"
+                      sh 'python harbor_scanner.py -i $APP_IMAGE_NAME -r $HARBOR_REGISTRY -p $HARBOR_PROJECT -c ${USERNAME}:${PASSWORD}'
+                  }
+            }
+        }
         // stage('Database docker build') {
             // // Not needed since building is now in the other jenkinsfile
             // steps {
