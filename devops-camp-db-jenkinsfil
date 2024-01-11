@@ -1,0 +1,93 @@
+pipeline {
+    agent {
+        label 'jenkins-agent'
+    }
+    //TODO: add environment variables
+    environment {
+        PIPELINE_HASH = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+        HARBOR_REGISTRY = 'registry.dev.afsmtddso.com'
+        HARBOR_PROJECT = 'salvador-villalon-harbor-project'
+        DB_IMAGE_NAME = 'db'
+    }
+    stages {
+        //TODO: add stages to pipeline
+        stage('Application repository') {
+            steps {
+                echo "Cloning application repository"
+                sh 'git clone https://github.com/salvillalon45/afs-labs-student.git'
+                dir('afs-labs-student') {
+                    script {
+                        //  In the snippet below, we modify the script for the environmental variable COMMIT_HASH to track any changes in the database.sql file and grab its commit hash.
+                        // COMMIT_HASH and PIPELINE_HASH will be used to uniquely "tag" the database Docker image.
+                        env.COMMIT_HASH = sh(script: 'git log --format=format:%h -1 --follow database/database.sql', returnStdout: true).trim()
+                    }
+                }
+                withCredentials([usernamePassword(credentialsId: 'svillalon-harbor-auth', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    script {
+                        // We’re adding an environment variable, BUILD_DB, and assigning it to execute the check_harbor_db.py script and store either true or false.
+                        env.BUILD_DB = sh(script: 'python check_harbor_db.py -h $COMMIT_HASH -i $DB_IMAGE_NAME -r $HARBOR_REGISTRY -p $HARBOR_PROJECT -c ${USERNAME}:${PASSWORD}', returnStdout: true).trim()
+                    }
+                }
+            }
+        }
+        stage('DB changes: true') {
+            /*
+                 Our new environment variable BUILD_DB will be used in the stage('DB changes: true') {}block. 
+                 When there are changes to database.sql, BUILD_DB will be set to true. Then the stages to build, scan, and 
+                 deploy the database will execute. 
+                 If BUILD_DB is set to false, the pipeline will skip this stage.
+            */
+            /*
+                The stage('DB changes: true') {} is a conditional stage (i.e., the when {} block) that contains a stages {} block. 
+                Think of this as a nested concept, so within the stages there will be multiple stage {} blocks.
+            */
+           when {
+              environment name: 'BUILD_DB', value: 'true'
+           }
+           stages {
+              stage('Database docker build') {
+                  steps {
+                      echo "Building database image"
+                      //TODO: build docker image & push to Harbor
+                      withCredentials([usernameColonPassword(credentialsId: 'svillalon-harbor-auth', variable: 'HARBOR-AUTH')]) {
+                          script {
+                              sh 'docker build -t $DB_IMAGE_NAME-$COMMIT_HASH -f ./db/Dockerfile ./afs-labs-student'
+                              docker.withRegistry('https://$HARBOR_REGISTRY', 'svillalon-harbor-auth') {
+                                  sh 'docker tag $DB_IMAGE_NAME-$COMMIT_HASH $HARBOR_REGISTRY/$HARBOR_PROJECT/$DB_IMAGE_NAME:$COMMIT_HASH-$PIPELINE_HASH'
+                                  sh 'docker push $HARBOR_REGISTRY/$HARBOR_PROJECT/$DB_IMAGE_NAME:$COMMIT_HASH-$PIPELINE_HASH'
+                              }
+                          }
+                      }
+                  }
+                  post {
+                      //TODO: clean local docker images
+                      always {
+                          echo "Clean local $DB_IMAGE_NAME image"
+                          script {
+                              try {
+                                  sh 'docker rmi $DB_IMAGE_NAME-$COMMIT_HASH:latest'
+                                  sh 'docker rmi $HARBOR_REGISTRY/$HARBOR_PROJECT/$DB_IMAGE_NAME:$COMMIT_HASH-$PIPELINE_HASH'
+                              } catch (err) {
+                                  echo err.getMessage()
+                              }
+                          }
+                      }
+                  }
+              }
+              stage('Deploy') {
+                  steps {
+                      echo "Deployment stage"
+                      //TODO: deploy database
+                      sh 'kubectl -n svillalon set image deployment/db-deployment db-deployment=$HARBOR_REGISTRY/$HARBOR_PROJECT/$DB_IMAGE_NAME:$COMMIT_HASH-$PIPELINE_HASH'
+                  }
+              }
+           }
+        }
+    }
+    post {
+        cleanup {
+            echo "Clean workspace"
+            sh 'rm -rf .git ./*'
+        }
+    }
+}
